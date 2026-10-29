@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Cloudflare IPv6 DDNS 自动化部署与管理脚本
-# 支持：原生 Systemd 守护进程 (低占用高兼容) 与 Docker 容器部署
+# 架构：100% 纯原生 Shell 脚本实现，零 Python 依赖，零第三方库
+# 支持：原生 Systemd 守护进程 (内存开销 <2MB) 与 Docker 容器部署
 # 特性：兼容 API Token 与 Global API Key、内核智能选路自适应网卡、IPv6 变动秒级推送
 # ==============================================================================
 
@@ -10,7 +11,7 @@ set -e
 CONFIG_DIR="/etc/cf-ddns"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 CACHE_FILE="${CONFIG_DIR}/last_ipv6.txt"
-SCRIPT_FILE="/usr/local/bin/cf-ddns.py"
+SCRIPT_FILE="/usr/local/bin/cf-ddns-sync.sh"
 SERVICE_FILE="/etc/systemd/system/cf-ddns.service"
 DOCKER_CONTAINER="cf-ddns-ipv6"
 
@@ -34,11 +35,38 @@ check_root() {
 detect_ipv6() {
     local ip=""
     # 策略 1: 查询前往 Cloudflare DNS 的源路由 IP (微秒级响应，无需指定物理网卡)
-    ip=$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | grep -oP 'src \K\S+' || true)
-    # 策略 2: 备用公网回显 API
-    if [[ -z "$ip" ]]; then
-        ip=$(curl -6 -s --connect-timeout 3 https://6.ipw.cn 2>/dev/null || curl -6 -s --connect-timeout 3 https://api64.ipify.org 2>/dev/null || true)
+    if command -v ip &>/dev/null; then
+        local route_out
+        route_out=$(ip -6 route get 2606:4700:4700::1111 2>/dev/null || true)
+        ip=$(echo "$route_out" | grep -oE "src[[:space:]]+[0-9a-fA-F:]+" | awk '{print $2}' | head -n 1)
+        if [[ -n "$ip" && "$ip" =~ ^[0-9a-fA-F:]+$ ]]; then
+            case "$ip" in
+                fe80:*|fc*|fd*|::1|::) ip="" ;;
+            esac
+        else
+            ip=""
+        fi
     fi
+
+    # 策略 2: 备用公网回显 API (通用容灾)
+    if [[ -z "$ip" ]]; then
+        local urls=("https://6.ipw.cn" "https://api64.ipify.org" "https://v6.ident.me")
+        for u in "${urls[@]}"; do
+            local cand=""
+            if command -v curl &>/dev/null; then
+                cand=$(curl -6 -s --connect-timeout 3 -m 5 "$u" 2>/dev/null | tr -d "[:space:]" || true)
+            elif command -v wget &>/dev/null; then
+                cand=$(wget -6 -qO- --timeout=4 "$u" 2>/dev/null | tr -d "[:space:]" || true)
+            fi
+            if [[ -n "$cand" && "$cand" == *:* ]]; then
+                case "$cand" in
+                    fe80:*|fc*|fd*|::1|::) ;;
+                    *) ip="$cand"; break ;;
+                esac
+            fi
+        done
+    fi
+
     echo "$ip"
 }
 
@@ -48,10 +76,21 @@ install_systemd_core() {
     local interval="$3"
     local email="$4"
 
-    log_info "正在配置宿主机环境 (Python3 + Systemd)..."
-    if ! command -v python3 &>/dev/null; then
-        log_err "未检测到 Python3，请先安装: apt update && apt install -y python3"
-        exit 1
+    log_info "正在配置宿主机环境 (纯原生 Shell + Systemd)..."
+
+    # 检查基础工具依赖
+    if ! command -v curl &>/dev/null; then
+        log_warn "系统未检测到 curl，尝试自动安装..."
+        if command -v apt-get &>/dev/null; then
+            apt-get update && apt-get install -y curl
+        elif command -v yum &>/dev/null; then
+            yum install -y curl
+        elif command -v apk &>/dev/null; then
+            apk add curl
+        elif ! command -v wget &>/dev/null; then
+            log_err "未检测到 curl 或 wget，请先安装: apt update && apt install -y curl"
+            exit 1
+        fi
     fi
 
     mkdir -p "$CONFIG_DIR"
@@ -67,164 +106,247 @@ install_systemd_core() {
 JSON
     chmod 600 "$CONFIG_FILE"
 
-    # 生成 Python 核心守护程序（纯标准库，兼容 Token 与 Global Key）
-    cat << 'PYEOF' > "$SCRIPT_FILE"
-#!/usr/bin/env python3
-import os
-import sys
-import time
-import json
-import re
-import subprocess
-import urllib.request
-import urllib.error
+    # 生成纯 Shell 核心守护程序（零 Python 依赖，纯系统基础工具）
+    cat << 'SFILE' > "$SCRIPT_FILE"
+#!/usr/bin/env bash
+# ==============================================================================
+# Cloudflare IPv6 DDNS 同步守护进程 (纯原生 Shell 实现，零 Python 依赖)
+# ==============================================================================
 
-CONFIG_PATH = "/etc/cf-ddns/config.json"
-CACHE_PATH = "/etc/cf-ddns/last_ipv6.txt"
-CF_API_BASE = "https://api.cloudflare.com/client/v4"
+set -u
 
-def log(msg):
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+CONFIG_PATH="/etc/cf-ddns/config.json"
+CACHE_PATH="/etc/cf-ddns/last_ipv6.txt"
+CF_API_BASE="https://api.cloudflare.com/client/v4"
 
-def get_best_ipv6():
-    try:
-        res = subprocess.run(
-            ["ip", "-6", "route", "get", "2606:4700:4700::1111"],
-            capture_output=True, text=True, timeout=2
-        )
-        m = re.search(r"src\s+([0-9a-fA-F:]+)", res.stdout)
-        if m:
-            ip = m.group(1).strip()
-            if not ip.startswith(("fe80:", "fc", "fd", "::1")):
-                return ip
-    except Exception:
-        pass
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+}
 
-    for url in ["https://6.ipw.cn", "https://api64.ipify.org", "https://v6.ident.me"]:
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "curl/7.88"})
-            with urllib.request.urlopen(req, timeout=4) as resp:
-                ip = resp.read().decode().strip()
-                if ":" in ip and not ip.startswith(("fe80:", "fc", "fd")):
-                    return ip
-        except Exception:
-            continue
-    return None
+# 提取 JSON 字段（纯 sed，零外部依赖）
+parse_json_val() {
+    local key="$1"
+    local file="$2"
+    sed -n -E 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "$file" | head -n 1
+}
 
-def cf_api(url, method, token, email="", data=None):
-    headers = {"Content-Type": "application/json"}
-    if email:
-        headers["X-Auth-Key"] = token
-        headers["X-Auth-Email"] = email
-    else:
-        headers["Authorization"] = f"Bearer {token}"
+parse_json_int() {
+    local key="$1"
+    local file="$2"
+    sed -n -E 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$file" | head -n 1
+}
 
-    payload = json.dumps(data).encode() if data else None
-    req = urllib.request.Request(url, data=payload, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        err = e.read().decode()
-        if "6111" in err:
-            log(f"Cloudflare 认证失败: Authorization 格式错误。若您使用的是 37 位 Global API Key，必须配置注册邮箱。")
-        elif "9103" in err:
-            log(f"Cloudflare 认证失败: Global API Key 与邮箱不匹配，请核对。")
-        elif "10000" in err:
-            log(f"Cloudflare 认证失败: API Token 无效或已过期。")
-        else:
-            log(f"Cloudflare API 异常 ({e.code}): {err}")
-        return None
-    except Exception as e:
-        log(f"网络异常: {e}")
-        return None
+# 获取公网最佳 IPv6
+get_best_ipv6() {
+    local ip=""
+    # 策略 1: 内核智能路由表寻路 (微秒级响应，无需指定物理网卡)
+    if command -v ip &>/dev/null; then
+        local route_out
+        route_out=$(ip -6 route get 2606:4700:4700::1111 2>/dev/null || true)
+        ip=$(echo "$route_out" | grep -oE 'src[[:space:]]+[0-9a-fA-F:]+' | awk '{print $2}' | head -n 1)
+        if [[ -n "$ip" && "$ip" =~ ^[0-9a-fA-F:]+$ ]]; then
+            case "$ip" in
+                fe80:*|fc*|fd*|::1|::) ip="" ;;
+            esac
+        else
+            ip=""
+        fi
+    fi
 
-def find_zone_id(domain, token, email=""):
-    # 智能尝试从后缀提取根 Zone (例如 debian.996668.xyz -> 查找 996668.xyz)
-    parts = domain.strip(".").split(".")
-    for i in range(len(parts) - 1):
-        candidate_zone = ".".join(parts[i:])
-        url = f"{CF_API_BASE}/zones?name={candidate_zone}&status=active"
-        res = cf_api(url, "GET", token, email)
-        if res and res.get("result"):
-            return res["result"][0]["id"], candidate_zone
-    return None, None
+    # 策略 2: 备用公网回显 API
+    if [[ -z "$ip" ]]; then
+        local urls=("https://6.ipw.cn" "https://api64.ipify.org" "https://v6.ident.me")
+        for u in "${urls[@]}"; do
+            local cand=""
+            if command -v curl &>/dev/null; then
+                cand=$(curl -6 -s --connect-timeout 3 -m 5 "$u" 2>/dev/null | tr -d '[:space:]' || true)
+            elif command -v wget &>/dev/null; then
+                cand=$(wget -6 -qO- --timeout=4 "$u" 2>/dev/null | tr -d '[:space:]' || true)
+            fi
+            if [[ -n "$cand" && "$cand" == *:* ]]; then
+                case "$cand" in
+                    fe80:*|fc*|fd*|::1|::) ;;
+                    *) ip="$cand"; break ;;
+                esac
+            fi
+        done
+    fi
 
-def sync_cloudflare(token, email, domain, new_ip):
-    zone_id, zone_name = find_zone_id(domain, token, email)
-    if not zone_id:
-        log(f"未找到域名 {domain} 对应的有效 Cloudflare Zone，请检查凭据权限或域名是否托管在当前账号下")
-        return False
+    echo "$ip"
+}
 
-    records = cf_api(f"{CF_API_BASE}/zones/{zone_id}/dns_records?type=AAAA&name={domain}", "GET", token, email)
-    record_id = None
-    if records and records.get("result"):
-        record_id = records["result"][0]["id"]
-        remote_ip = records["result"][0]["content"]
-        if remote_ip == new_ip:
-            log(f"Cloudflare 解析记录已为最新 IP ({new_ip})，跳过同步")
-            return True
+# 调用 Cloudflare API
+cf_api_request() {
+    local method="$1"
+    local url="$2"
+    local token="$3"
+    local email="${4:-}"
+    local body="${5:-}"
 
-    payload = {
-        "type": "AAAA",
-        "name": domain,
-        "content": new_ip,
-        "ttl": 60,
-        "proxied": False
-    }
+    local headers=(-H "Content-Type: application/json")
+    if [[ -n "$email" ]]; then
+        headers+=(-H "X-Auth-Key: ${token}" -H "X-Auth-Email: ${email}")
+    else
+        headers+=(-H "Authorization: Bearer ${token}")
+    fi
 
-    if record_id:
-        res = cf_api(f"{CF_API_BASE}/zones/{zone_id}/dns_records/{record_id}", "PUT", token, email, payload)
-    else:
-        res = cf_api(f"{CF_API_BASE}/zones/{zone_id}/dns_records", "POST", token, email, payload)
+    if [[ -n "$body" ]]; then
+        curl -s -X "$method" "$url" "${headers[@]}" -d "$body" --connect-timeout 8 -m 12 2>/dev/null || true
+    else
+        curl -s -X "$method" "$url" "${headers[@]}" --connect-timeout 8 -m 12 2>/dev/null || true
+    fi
+}
 
-    if res and res.get("success"):
-        log(f"[SUCCESS] 解析已成功更新: {domain} -> {new_ip}")
-        return True
-    else:
-        log("[FAILED] 解析更新失败")
-        return False
+# 递归匹配主域名 Zone ID
+find_zone_id() {
+    local domain="$1"
+    local token="$2"
+    local email="$3"
 
-def main():
-    if not os.path.exists(CONFIG_PATH):
-        log(f"配置文件不存在: {CONFIG_PATH}")
-        sys.exit(1)
+    local d="${domain#.}"
+    d="${d%.}"
 
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        cfg = json.load(f)
+    while [[ "$d" == *.* ]]; do
+        local url="${CF_API_BASE}/zones?name=${d}&status=active"
+        local resp
+        resp=$(cf_api_request "GET" "$url" "$token" "$email")
 
-    token = cfg.get("token", "").strip()
-    email = cfg.get("email", "").strip()
-    domain = cfg.get("domain", "").strip()
-    interval = int(cfg.get("interval", 60))
+        if echo "$resp" | grep -q '"success":true'; then
+            local zid
+            zid=$(echo "$resp" | sed -n -E 's/.*"result"[[:space:]]*:[[:space:]]*\[[[:space:]]*\{[[:space:]]*"id"[[:space:]]*:[[:space:]]*"([a-f0-9]{32})".*/\1/p')
+            if [[ -z "$zid" ]]; then
+                zid=$(echo "$resp" | grep -oE '"id"[[:space:]]*:[[:space:]]*"[a-f0-9]{32}"' | grep -oE '[a-f0-9]{32}' | head -n 1)
+            fi
+            if [[ -n "$zid" ]]; then
+                echo "$zid"
+                return 0
+            fi
+        fi
+        d="${d#*.}"
+    done
+    return 1
+}
 
-    auth_type = f"Global API Key (账号: {email})" if email else "API Token (Bearer)"
-    log(f"CF-DDNS 启动监控: 域名={domain}, 认证={auth_type}, 间隔={interval}s")
+# 同步 Cloudflare DNS 解析
+sync_cloudflare() {
+    local token="$1"
+    local email="$2"
+    local domain="$3"
+    local new_ip="$4"
 
-    while True:
-        try:
-            current_ip = get_best_ipv6()
-            if current_ip:
-                last_ip = ""
-                if os.path.exists(CACHE_PATH):
-                    with open(CACHE_PATH, "r", encoding="utf-8") as f:
-                        last_ip = f.read().strip()
+    local zone_id
+    zone_id=$(find_zone_id "$domain" "$token" "$email" || true)
+    if [[ -z "$zone_id" ]]; then
+        log "未找到域名 ${domain} 对应的有效 Cloudflare Zone，请核对权限或域名托管状态"
+        return 1
+    fi
 
-                if current_ip != last_ip:
-                    log(f"检测到 IPv6 地址变更: [{last_ip}] -> [{current_ip}]")
-                    if sync_cloudflare(token, email, domain, current_ip):
-                        with open(CACHE_PATH, "w", encoding="utf-8") as f:
-                            f.write(current_ip)
-            else:
-                log("未能检测到有效的公网 IPv6，将在下个周期重试")
-        except Exception as e:
-            log(f"主调度异常: {e}")
+    # 查询当前已有 AAAA 记录
+    local query_url="${CF_API_BASE}/zones/${zone_id}/dns_records?type=AAAA&name=${domain}"
+    local record_resp
+    record_resp=$(cf_api_request "GET" "$query_url" "$token" "$email")
 
-        time.sleep(interval)
+    local record_id=""
+    local remote_ip=""
+    if echo "$record_resp" | grep -q '"success":true'; then
+        record_id=$(echo "$record_resp" | sed -n -E 's/.*"result"[[:space:]]*:[[:space:]]*\[[[:space:]]*\{[[:space:]]*"id"[[:space:]]*:[[:space:]]*"([a-f0-9]{32})".*/\1/p')
+        remote_ip=$(echo "$record_resp" | grep -oE '"content"[[:space:]]*:[[:space:]]*"[^"]+"' | sed -E 's/.*"content"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/' | head -n 1)
+        if [[ "$remote_ip" == "$new_ip" ]]; then
+            log "Cloudflare 解析记录已为最新 IP (${new_ip})，跳过同步"
+            return 0
+        fi
+    fi
 
-if __name__ == "__main__":
-    main()
-PYEOF
+    local payload="{\"type\":\"AAAA\",\"name\":\"${domain}\",\"content\":\"${new_ip}\",\"ttl\":60,\"proxied\":false}"
+    local update_resp
+    if [[ -n "$record_id" ]]; then
+        update_resp=$(cf_api_request "PUT" "${CF_API_BASE}/zones/${zone_id}/dns_records/${record_id}" "$token" "$email" "$payload")
+    else
+        update_resp=$(cf_api_request "POST" "${CF_API_BASE}/zones/${zone_id}/dns_records" "$token" "$email" "$payload")
+    fi
+
+    if echo "$update_resp" | grep -q '"success":true'; then
+        log "[SUCCESS] 解析已成功更新: ${domain} -> ${new_ip}"
+        return 0
+    else
+        local err_msg
+        err_msg=$(echo "$update_resp" | grep -oE '"message"[[:space:]]*:[[:space:]]*"[^"]+"' | head -n 1 || echo "$update_resp")
+        log "[FAILED] 解析更新失败: ${err_msg}"
+        return 1
+    fi
+}
+
+run_sync_cycle() {
+    if [[ ! -f "$CONFIG_PATH" ]]; then
+        log "配置文件不存在: ${CONFIG_PATH}"
+        return 1
+    fi
+
+    local token email domain interval
+    token=$(parse_json_val "token" "$CONFIG_PATH")
+    email=$(parse_json_val "email" "$CONFIG_PATH")
+    domain=$(parse_json_val "domain" "$CONFIG_PATH")
+    interval=$(parse_json_int "interval" "$CONFIG_PATH")
+    interval=${interval:-60}
+
+    if [[ -z "$token" || -z "$domain" ]]; then
+        log "配置文件中的 token 或 domain 为空，请检查: ${CONFIG_PATH}"
+        return 1
+    fi
+
+    local current_ip
+    current_ip=$(get_best_ipv6)
+
+    if [[ -n "$current_ip" ]]; then
+        local last_ip=""
+        if [[ -f "$CACHE_PATH" ]]; then
+            last_ip=$(cat "$CACHE_PATH" 2>/dev/null | tr -d '[:space:]' || true)
+        fi
+
+        if [[ "$current_ip" != "$last_ip" ]]; then
+            log "检测到 IPv6 地址变更: [${last_ip}] -> [${current_ip}]"
+            if sync_cloudflare "$token" "$email" "$domain" "$current_ip"; then
+                echo "$current_ip" > "$CACHE_PATH"
+            fi
+        fi
+    else
+        log "未能检测到有效的公网 IPv6 地址，将在下个周期重试"
+    fi
+}
+
+main() {
+    if [[ ! -f "$CONFIG_PATH" ]]; then
+        log "配置文件不存在: ${CONFIG_PATH}"
+        exit 1
+    fi
+
+    local token email domain interval
+    token=$(parse_json_val "token" "$CONFIG_PATH")
+    email=$(parse_json_val "email" "$CONFIG_PATH")
+    domain=$(parse_json_val "domain" "$CONFIG_PATH")
+    interval=$(parse_json_int "interval" "$CONFIG_PATH")
+    interval=${interval:-60}
+
+    local auth_desc="API Token (Bearer)"
+    if [[ -n "$email" ]]; then
+        auth_desc="Global API Key (账号: ${email})"
+    fi
+
+    log "CF-DDNS 守护进程启动 (原生 Shell 版): 域名=${domain}, 认证=${auth_desc}, 周期=${interval}s"
+
+    if [[ "${1:-}" == "--once" ]]; then
+        run_sync_cycle
+        exit 0
+    fi
+
+    while true; do
+        run_sync_cycle || true
+        sleep "$interval"
+    done
+}
+
+main "$@"
+SFILE
 
     chmod +x "$SCRIPT_FILE"
 
@@ -236,7 +358,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 ${SCRIPT_FILE}
+ExecStart=/bin/bash ${SCRIPT_FILE}
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -304,7 +426,7 @@ action_install() {
     fi
 
     # 输入密钥
-    read -rp "1. 请输入 Cloudflare API Token 或 Global API Key: " input_token
+    read -rp "1. 请输入 Cloudflare API Token 或 Global Key: " input_token
     input_token=$(echo "$input_token" | tr -d '[:space:]')
     while [[ -z "$input_token" ]]; do
         read -rp "密钥不能为空，请重新输入: " input_token
@@ -324,7 +446,7 @@ action_install() {
     fi
 
     # 输入域名
-    read -rp "2. 请输入完整解析域名 (如 debian.996668.xyz): " input_domain
+    read -rp "2. 请输入完整解析域名 (如 debian.example.com): " input_domain
     input_domain=$(echo "$input_domain" | tr -d '[:space:]')
     while [[ -z "$input_domain" ]]; do
         read -rp "域名不能为空，请重新输入: " input_domain
@@ -337,7 +459,7 @@ action_install() {
 
     # 选择部署模式
     echo -e "\n${YELLOW}请选择部署模式:${RESET}"
-    echo "  [1] 宿主机原生部署 (Systemd 守护, 纯标准库, 内存约 6MB) [默认推荐]"
+    echo "  [1] 宿主机原生部署 (Systemd 守护, 纯原生 Shell, 内存 <2MB) [默认推荐]"
     echo "  [2] Docker 容器部署 (基于轻量 Go 镜像, 独立容器隔离)"
     read -rp "请输入选项 [1 或 2, 默认 1]: " mode_choice
     mode_choice=${mode_choice:-1}
@@ -419,17 +541,18 @@ action_uninstall() {
 
     if [[ -f "$SERVICE_FILE" ]]; then
         systemctl disable cf-ddns >/dev/null 2>&1 || true
-        rm "$SERVICE_FILE" 2>/dev/null || true
+        rm -f "$SERVICE_FILE" 2>/dev/null || true
         systemctl daemon-reload
     fi
     if [[ -f "$SCRIPT_FILE" ]]; then
-        rm "$SCRIPT_FILE" 2>/dev/null || true
+        rm -f "$SCRIPT_FILE" 2>/dev/null || true
     fi
+    rm -f "/usr/local/bin/cf-ddns.py" 2>/dev/null || true
     if [[ -d "$CONFIG_DIR" ]]; then
-        rm -r "$CONFIG_DIR" 2>/dev/null || true
+        rm -rf "$CONFIG_DIR" 2>/dev/null || true
     fi
     if command -v docker &>/dev/null && docker ps -a --format '{{.Names}}' | grep -Eq "^${DOCKER_CONTAINER}\$"; then
-        docker rm "${DOCKER_CONTAINER}" >/dev/null 2>&1 || true
+        docker rm -f "${DOCKER_CONTAINER}" >/dev/null 2>&1 || true
     fi
     if [[ -f "/usr/local/bin/cf-ipv6-ddns" ]]; then
         rm -f "/usr/local/bin/cf-ipv6-ddns" 2>/dev/null || true
@@ -440,7 +563,7 @@ action_uninstall() {
 
 check_root
 
-case "$1" in
+case "${1:-}" in
     install)
         action_install
         ;;
