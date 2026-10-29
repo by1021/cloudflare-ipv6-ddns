@@ -1,0 +1,7 @@
+.mindfs/
+*.log
+*.tmp
+__pycache__/
+*.py[cod]
+.vscode/
+.idea/
