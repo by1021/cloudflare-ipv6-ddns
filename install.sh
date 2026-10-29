@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # Cloudflare IPv6 DDNS 一键在线安装脚本
-# 从 GitHub 拉取最新核心脚本至 /usr/local/bin/cf-ipv6-ddns 并启动配置向导
+# 从 GitHub 拉取最新核心脚本至当前执行目录与 /usr/local/bin/cf-ipv6-ddns 并启动配置向导
 # ==============================================================================
 
 set -e
 
 REPO_RAW_URL="https://raw.githubusercontent.com/by1021/cloudflare-ipv6-ddns/main/cf-ipv6-ddns.sh"
 MIRROR_RAW_URL="https://ghfast.top/https://raw.githubusercontent.com/by1021/cloudflare-ipv6-ddns/main/cf-ipv6-ddns.sh"
-TARGET_FILE="/usr/local/bin/cf-ipv6-ddns"
+EXEC_DIR="$(pwd)"
+LOCAL_SCRIPT="${EXEC_DIR}/cf-ipv6-ddns.sh"
+GLOBAL_SCRIPT="/usr/local/bin/cf-ipv6-ddns"
 
 GREEN="\033[32m"
 BLUE="\033[34m"
@@ -66,17 +68,28 @@ if [[ ! -s "$TMP_FILE" ]]; then
     exit 1
 fi
 
-# 安装核心脚本到系统可执行路径
-$SUDO mkdir -p "$(dirname "$TARGET_FILE")"
-$SUDO mv -f "$TMP_FILE" "$TARGET_FILE"
-$SUDO chmod 755 "$TARGET_FILE"
+# 1. 保存核心脚本至当前执行目录（默认 root 路径下: /root/cf-ipv6-ddns.sh）
+$SUDO cp -f "$TMP_FILE" "$LOCAL_SCRIPT"
+$SUDO chmod 755 "$LOCAL_SCRIPT"
+if [[ $EUID -ne 0 && -n "${SUDO_USER:-}" ]]; then
+    $SUDO chown "${SUDO_USER}:" "$LOCAL_SCRIPT" 2>/dev/null || true
+elif [[ $EUID -ne 0 ]]; then
+    $SUDO chown "$(id -u):$(id -g)" "$LOCAL_SCRIPT" 2>/dev/null || true
+fi
+log_info "核心脚本已保存至执行目录: ${LOCAL_SCRIPT}"
 
-log_info "脚本已就绪: ${TARGET_FILE}"
+# 2. 同步注入系统全局可执行路径，保证任意路径均可调用快捷命令 cf-ipv6-ddns
+if [[ "$LOCAL_SCRIPT" != "$GLOBAL_SCRIPT" ]]; then
+    $SUDO mkdir -p "$(dirname "$GLOBAL_SCRIPT")"
+    $SUDO cp -f "$TMP_FILE" "$GLOBAL_SCRIPT"
+    $SUDO chmod 755 "$GLOBAL_SCRIPT"
+    log_info "全局快捷命令已就绪: ${GLOBAL_SCRIPT}"
+fi
 
 # 启动安装向导
 # 若标准输入并非终端（例如通过管道 curl ... | bash 启动），从 /dev/tty 接管输入
 if [ ! -t 0 ] && [ -e /dev/tty ]; then
-    exec $SUDO "$TARGET_FILE" install "$@" < /dev/tty
+    exec $SUDO "$LOCAL_SCRIPT" install "$@" < /dev/tty
 else
-    exec $SUDO "$TARGET_FILE" install "$@"
+    exec $SUDO "$LOCAL_SCRIPT" install "$@"
 fi

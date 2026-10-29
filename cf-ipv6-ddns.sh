@@ -477,13 +477,13 @@ action_install() {
         echo -e "\n${GREEN}[✔] 部署完成！${RESET}"
         echo "  - 查看服务状态: systemctl status cf-ddns"
         echo "  - 实时查看日志: journalctl -u cf-ddns -f"
-        echo "  - 快捷管理命令: cf-ipv6-ddns"
+        echo "  - 快捷管理命令: cf-ipv6-ddns (或在当前目录执行: ./cf-ipv6-ddns.sh)"
     else
         install_docker_core "$input_token" "$input_domain" "$input_interval" "$input_email"
         echo -e "\n${GREEN}[✔] 部署完成！${RESET}"
         echo "  - 查看容器状态: docker ps -f name=${DOCKER_CONTAINER}"
         echo "  - 实时查看日志: docker logs -f ${DOCKER_CONTAINER}"
-        echo "  - 快捷管理命令: cf-ipv6-ddns"
+        echo "  - 快捷管理命令: cf-ipv6-ddns (或在当前目录执行: ./cf-ipv6-ddns.sh)"
     fi
 }
 

@@ -56,7 +56,7 @@ curl -fsSL https://raw.githubusercontent.com/by1021/cloudflare-ipv6-ddns/main/in
   ```
 </details>
 
-> 💡 **设计说明**：安装脚本已包含提权检测与安全终端劫持，无论以普通用户或 root 执行均可正常弹出交互提示。安装完成后，系统将自动注入全局命令 `cf-ipv6-ddns`。
+> 💡 **设计说明**：安装脚本已包含提权检测与安全终端劫持，无论以普通用户或 root 执行均可正常弹出交互提示。脚本将保存在当前执行目录（默认 root 用户下即 `/root/cf-ipv6-ddns.sh`），并自动同步注入全局命令 `cf-ipv6-ddns`。
 
 ### 交互向导预览
 
@@ -78,7 +78,7 @@ curl -fsSL https://raw.githubusercontent.com/by1021/cloudflare-ipv6-ddns/main/in
 [✔] 部署完成！
   - 查看服务状态: systemctl status cf-ddns
   - 实时查看日志: journalctl -u cf-ddns -f
-  - 快捷管理命令: cf-ipv6-ddns
+  - 快捷管理命令: cf-ipv6-ddns (或在当前目录执行: ./cf-ipv6-ddns.sh)
 ```
 
 ---
