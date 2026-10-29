@@ -48,7 +48,32 @@
 
 ## 快速开始：一键部署
 
-在目标 Linux 机器上以 `root` 或 `sudo` 权限运行：
+### 方式一：一键在线极速安装（推荐，无需手动克隆）
+
+在 Linux 终端执行以下任意一条命令，将自动从 GitHub 拉取脚本并启动交互向导：
+
+**使用 curl（官方源）：**
+```bash
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/by1021/Cloudflare_ddns/main/install.sh)"
+```
+
+**使用 wget（官方源）：**
+```bash
+sudo bash -c "$(wget -qO- https://raw.githubusercontent.com/by1021/Cloudflare_ddns/main/install.sh)"
+```
+
+**国内服务器加速通道（免翻墙）：**
+```bash
+sudo bash -c "$(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/by1021/Cloudflare_ddns/main/install.sh)"
+```
+
+> **说明**：安装脚本会自动将核心管理程序写入 `/usr/local/bin/cf-ipv6-ddns`，安装完成后可在系统任意位置直接输入 `sudo cf-ipv6-ddns` 唤出管理菜单。
+
+---
+
+### 方式二：手动克隆仓库部署
+
+适合需要审计或二次定制源码的用户：
 
 ```bash
 # 克隆仓库
@@ -56,8 +81,8 @@ git clone https://github.com/by1021/Cloudflare_ddns.git
 cd Cloudflare_ddns
 
 # 赋予执行权限并启动交互向导
-chmod +x deploy_ddns.sh
-sudo ./deploy_ddns.sh
+chmod +x cf-ipv6-ddns.sh
+sudo ./cf-ipv6-ddns.sh
 ```
 
 ### 交互配置向导步骤
@@ -103,17 +128,38 @@ sudo systemctl restart cf-ddns
 
 ---
 
-## 常用运维排错命令
+## 快捷管理与常用运维命令
+
+### 全局快捷命令
+安装完成后，可在任意路径直接使用 `cf-ipv6-ddns` 进行日常管理：
 
 ```bash
-# 查看服务实时运行状态
+# 打开交互管理菜单（配置/状态/重启/停止/卸载）
+sudo cf-ipv6-ddns
+
+# 查看服务状态与最近日志
+sudo cf-ipv6-ddns status
+
+# 重启 DDNS 同步服务
+sudo cf-ipv6-ddns restart
+
+# 停止 DDNS 服务
+sudo cf-ipv6-ddns stop
+
+# 彻底卸载服务与配置文件
+sudo cf-ipv6-ddns uninstall
+```
+
+### 原生排错命令
+```bash
+# 查看 Systemd 服务实时运行状态
 sudo systemctl status cf-ddns
 
-# 跟踪查看动态解析日志
+# 跟踪查看动态解析实时日志
 sudo journalctl -u cf-ddns -f
 
 # 通过公共 DNS 验证 AAAA 解析是否已生效
-dig @1.1.1.1 AAAA ddns.example.com +short
+dig @[IP] AAAA ddns.example.com +short
 ```
 
 ---

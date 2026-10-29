@@ -342,16 +342,26 @@ action_install() {
     read -rp "请输入选项 [1 或 2, 默认 1]: " mode_choice
     mode_choice=${mode_choice:-1}
 
+    # 固化管理命令到系统 PATH
+    local self_path
+    self_path="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+    if [[ -f "$self_path" && "$self_path" != "/usr/local/bin/cf-ipv6-ddns" ]]; then
+        cp -f "$self_path" /usr/local/bin/cf-ipv6-ddns 2>/dev/null || true
+        chmod +x /usr/local/bin/cf-ipv6-ddns 2>/dev/null || true
+    fi
+
     if [[ "$mode_choice" == "1" ]]; then
         install_systemd_core "$input_token" "$input_domain" "$input_interval" "$input_email"
         echo -e "\n${GREEN}[✔] 部署完成！${RESET}"
         echo "  - 查看服务状态: systemctl status cf-ddns"
         echo "  - 实时查看日志: journalctl -u cf-ddns -f"
+        echo "  - 快捷管理命令: cf-ipv6-ddns"
     else
         install_docker_core "$input_token" "$input_domain" "$input_interval" "$input_email"
         echo -e "\n${GREEN}[✔] 部署完成！${RESET}"
         echo "  - 查看容器状态: docker ps -f name=${DOCKER_CONTAINER}"
         echo "  - 实时查看日志: docker logs -f ${DOCKER_CONTAINER}"
+        echo "  - 快捷管理命令: cf-ipv6-ddns"
     fi
 }
 
@@ -385,6 +395,18 @@ action_stop() {
     fi
 }
 
+action_restart() {
+    log_info "正在重启相关服务..."
+    if systemctl is-enabled --quiet cf-ddns 2>/dev/null || systemctl is-active --quiet cf-ddns 2>/dev/null; then
+        systemctl restart cf-ddns
+        log_info "已重启 Systemd 服务"
+    fi
+    if command -v docker &>/dev/null && docker ps -a --format '{{.Names}}' | grep -Eq "^${DOCKER_CONTAINER}\$"; then
+        docker restart "${DOCKER_CONTAINER}" >/dev/null 2>&1 || true
+        log_info "已重启 Docker 容器"
+    fi
+}
+
 action_uninstall() {
     log_warn "确认卸载 CF-DDNS 服务及所有相关配置文件吗？(y/N)"
     read -rp "" confirm
@@ -409,6 +431,9 @@ action_uninstall() {
     if command -v docker &>/dev/null && docker ps -a --format '{{.Names}}' | grep -Eq "^${DOCKER_CONTAINER}\$"; then
         docker rm "${DOCKER_CONTAINER}" >/dev/null 2>&1 || true
     fi
+    if [[ -f "/usr/local/bin/cf-ipv6-ddns" ]]; then
+        rm -f "/usr/local/bin/cf-ipv6-ddns" 2>/dev/null || true
+    fi
 
     log_info "卸载已完成！"
 }
@@ -422,6 +447,9 @@ case "$1" in
     status)
         action_status
         ;;
+    restart)
+        action_restart
+        ;;
     stop)
         action_stop
         ;;
@@ -434,16 +462,18 @@ case "$1" in
         echo -e "${BLUE}==================================================${RESET}"
         echo " 1. 一键安装 / 重新配置 (Install / Reconfigure)"
         echo " 2. 查看服务状态与最近日志 (Status & Logs)"
-        echo " 3. 停止当前运行服务 (Stop)"
-        echo " 4. 彻底卸载服务与配置 (Uninstall)"
+        echo " 3. 重启运行服务 (Restart)"
+        echo " 4. 停止当前运行服务 (Stop)"
+        echo " 5. 彻底卸载服务与配置 (Uninstall)"
         echo " 0. 退出"
         echo -e "${BLUE}--------------------------------------------------${RESET}"
-        read -rp "请选择操作 [0-4]: " choice
+        read -rp "请选择操作 [0-5]: " choice
         case "$choice" in
             1) action_install ;;
             2) action_status ;;
-            3) action_stop ;;
-            4) action_uninstall ;;
+            3) action_restart ;;
+            4) action_stop ;;
+            5) action_uninstall ;;
             0) exit 0 ;;
             *) log_err "无效选项" ; exit 1 ;;
         esac
