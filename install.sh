@@ -6,7 +6,7 @@
 
 set -e
 
-REPO_RAW_URL="https://raw.githubusercontent.com/by1021/Cloudflare_ddns/main/cf-ipv6-ddns.sh"
+REPO_RAW_URL="https://raw.githubusercontent.com/by1021/cloudflare-ipv6-ddns/main/cf-ipv6-ddns.sh"
 TARGET_FILE="/usr/local/bin/cf-ipv6-ddns"
 
 GREEN="\033[32m"

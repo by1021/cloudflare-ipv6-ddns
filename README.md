@@ -54,17 +54,17 @@
 
 **使用 curl（官方源）：**
 ```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/by1021/Cloudflare_ddns/main/install.sh)"
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/by1021/cloudflare-ipv6-ddns/main/install.sh)"
 ```
 
 **使用 wget（官方源）：**
 ```bash
-sudo bash -c "$(wget -qO- https://raw.githubusercontent.com/by1021/Cloudflare_ddns/main/install.sh)"
+sudo bash -c "$(wget -qO- https://raw.githubusercontent.com/by1021/cloudflare-ipv6-ddns/main/install.sh)"
 ```
 
 **国内服务器加速通道（免翻墙）：**
 ```bash
-sudo bash -c "$(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/by1021/Cloudflare_ddns/main/install.sh)"
+sudo bash -c "$(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/by1021/cloudflare-ipv6-ddns/main/install.sh)"
 ```
 
 > **说明**：安装脚本会自动将核心管理程序写入 `/usr/local/bin/cf-ipv6-ddns`，安装完成后可在系统任意位置直接输入 `sudo cf-ipv6-ddns` 唤出管理菜单。
@@ -77,8 +77,8 @@ sudo bash -c "$(curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/
 
 ```bash
 # 克隆仓库
-git clone https://github.com/by1021/Cloudflare_ddns.git
-cd Cloudflare_ddns
+git clone https://github.com/by1021/cloudflare-ipv6-ddns.git
+cd cloudflare-ipv6-ddns
 
 # 赋予执行权限并启动交互向导
 chmod +x cf-ipv6-ddns.sh
